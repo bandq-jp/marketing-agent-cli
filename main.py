@@ -19,17 +19,21 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
-from datetime import datetime, timedelta
+import sys
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
-from pydantic import BaseModel, Field, HttpUrl, ValidationError
+from pydantic import BaseModel, Field
 
 # OpenAI Agents SDK（Python）
 from agents import Agent, Runner, function_tool, AgentOutputSchema  # noqa: E402
+import dotenv
+
+
+dotenv.load_dotenv()
 
 # ====== 環境変数 ======
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -76,14 +80,14 @@ class ImprovementPlan(BaseModel):
     sources: List[str] = Field(default_factory=list, description="参照データの出典（URLや説明）")
 
 # ====== コネクタ：WordPress（読み取りのみ） ======
-async def wp_list_posts(per_page: int = 20, days: int = 30) -> List[Dict[str, Any]]:
+def wp_list_posts(per_page: int = 20, days: int = 30) -> List[Dict[str, Any]]:
     """
     最新/更新の投稿を取得（読み取り専用）。
     認証：Application PasswordsのBasic認証。
     """
     if not WP_BASE_URL:
         return []
-    after = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+    after = (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
     url = f"{WP_BASE_URL.rstrip('/')}/wp-json/wp/v2/posts"
     params = {
         "per_page": per_page,
@@ -93,8 +97,8 @@ async def wp_list_posts(per_page: int = 20, days: int = 30) -> List[Dict[str, An
         "_fields": "id,link,date,modified,slug,title",
     }
     auth = (WP_APP_USER, WP_APP_PASSWORD) if (WP_APP_USER and WP_APP_PASSWORD) else None
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(url, params=params, auth=auth)
+    with httpx.Client(timeout=30.0) as client:
+        r = client.get(url, params=params, auth=auth)
         r.raise_for_status()
         return r.json()
 
@@ -111,7 +115,7 @@ def ga4_report_pages(
     metrics: screenPageViews, sessions
     """
     if not property_id:
-        property_id = GA4_PROPERTY_ID
+        return {"warning": "GA4 property is not configured. Skipping GA4 report."}
     client = BetaAnalyticsDataClient()  # GOOGLE_APPLICATION_CREDENTIALS を前提
     dims = [Dimension(name="date"), Dimension(name="pagePath"), Dimension(name="sessionDefaultChannelGroup")]
     mets = [Metric(name="screenPageViews"), Metric(name="sessions")]
@@ -151,6 +155,8 @@ def _gsc_credentials() -> Credentials:
     return creds
 
 def gsc_query(site_url: str, start_date: str, end_date: str, dimensions: List[str]) -> Dict[str, Any]:
+    if not site_url:
+        return {"warning": "GSC site URL is not configured. Skipping GSC query."}
     creds = _gsc_credentials()
     svc = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
     body = {
@@ -163,7 +169,7 @@ def gsc_query(site_url: str, start_date: str, end_date: str, dimensions: List[st
     return res or {}
 
 # ====== コネクタ：SerpAPI ======
-async def serpapi_search(q: str, num: int = 10, gl: str = "jp", hl: str = "ja") -> Dict[str, Any]:
+def serpapi_search(q: str, num: int = 10, gl: str = "jp", hl: str = "ja") -> Dict[str, Any]:
     if not SERPAPI_API_KEY:
         return {"error": "SERPAPI_API_KEY is not set."}
     params = {
@@ -174,8 +180,8 @@ async def serpapi_search(q: str, num: int = 10, gl: str = "jp", hl: str = "ja") 
         "num": num,
         "api_key": SERPAPI_API_KEY,
     }
-    async with httpx.AsyncClient(timeout=40.0) as client:
-        r = await client.get("https://serpapi.com/search", params=params)
+    with httpx.Client(timeout=40.0) as client:
+        r = client.get("https://serpapi.com/search", params=params)
         r.raise_for_status()
         return r.json()
 
@@ -183,7 +189,7 @@ async def serpapi_search(q: str, num: int = 10, gl: str = "jp", hl: str = "ja") 
 # ここでは実運用では Hosted/Remote MCP または stdio MCP を用いる。
 # Agents SDK の MCP 連携は公式ドキュメントに従いセットアップすること。
 # （MVPでは必須ではないため、関数ツールでモック的にエンドポイントを叩く例を残す）
-async def ahrefs_mcp_site_overview(domain: str) -> Dict[str, Any]:
+def ahrefs_mcp_site_overview(domain: str) -> Dict[str, Any]:
     if not AHREFS_API_KEY:
         return {"warning": "AHREFS_API_KEY not set. Skipping Ahrefs MCP call."}
     # 実際は MCP に handoff / tool-call する。ここでは説明用のダミー応答。
@@ -193,12 +199,12 @@ async def ahrefs_mcp_site_overview(domain: str) -> Dict[str, Any]:
 @function_tool
 def tool_wp_list_posts(per_page: int = 20, days: int = 30) -> List[Dict[str, Any]]:
     """WordPress: 最新/更新記事の一覧（読み取り）"""
-    return asyncio.get_event_loop().run_until_complete(wp_list_posts(per_page=per_page, days=days))
+    return wp_list_posts(per_page=per_page, days=days)
 
 @function_tool
 def tool_ga4_report(property_id: Optional[str], start_date: str, end_date: str) -> Dict[str, Any]:
     """GA4: PV/セッション推移レポート（読み取り）"""
-    return ga4_report_pages(property_id or "", start_date, end_date)
+    return ga4_report_pages(property_id or GA4_PROPERTY_ID, start_date, end_date)
 
 @function_tool
 def tool_gsc_query(site_url: str, start_date: str, end_date: str, dimensions: List[str]) -> Dict[str, Any]:
@@ -208,34 +214,29 @@ def tool_gsc_query(site_url: str, start_date: str, end_date: str, dimensions: Li
 @function_tool
 def tool_serpapi(q: str, num: int = 10, gl: str = "jp", hl: str = "ja") -> Dict[str, Any]:
     """SerpAPI: Google SERP の取得（読み取り）"""
-    return asyncio.get_event_loop().run_until_complete(serpapi_search(q, num, gl, hl))
+    return serpapi_search(q, num, gl, hl)
 
 @function_tool
 def tool_ahrefs_site_overview(domain: str) -> Dict[str, Any]:
     """Ahrefs: サイト概観（読み取り / MCP 経由想定）"""
-    return asyncio.get_event_loop().run_until_complete(ahrefs_mcp_site_overview(domain))
+    return ahrefs_mcp_site_overview(domain)
 
 # ====== エージェント（提案までを構造化出力） ======
 AGENT_INSTRUCTIONS = """
 あなたは社内マーケ部門のアナリストAIです。次を厳密に守ってください。
 - あなたは「読み取り専用」のツールだけを使います。CMS更新・公開・削除・API書き込み等は一切行いません。
 - WordPress/GA4/GSC/SerpAPI/Ahrefsから得たデータを横断的に解釈し、「改善案（提案）」までを出力してください。
+- 利用可能なツールが制限されている場合は、その範囲で分析し、不足データは「取得できない」旨を明示してください。
 - 出力は指定の構造（JSON）で返します。説明の冗長化は避け、要点と根拠を簡潔に。
 - 推奨KPI例：PV、セッション、CTR、平均掲載順位、流入チャネル別比率。
 - 日本語で回答してください。
 """
 
-def build_agent() -> Agent:
+def build_agent(enabled_tools: List[Any]) -> Agent:
     return Agent(
         name="Marketing Analysis Agent",
         instructions=AGENT_INSTRUCTIONS,
-        tools=[  # 読み取り系ツールのみ
-            tool_wp_list_posts,
-            tool_ga4_report,
-            tool_gsc_query,
-            tool_serpapi,
-            tool_ahrefs_site_overview,
-        ],
+        tools=enabled_tools,
         # 構造化出力（Strict JSON Schema）
         output_type=AgentOutputSchema(ImprovementPlan, strict_json_schema=True),
         # モデルはデフォルト（Responses APIの既定モデル）を使用。必要なら model/settings を指定可
@@ -243,13 +244,19 @@ def build_agent() -> Agent:
 
 # ====== CLI ======
 def _date_span(days: int) -> tuple[str, str]:
-    end = datetime.utcnow().date()
+    end = datetime.now(UTC).date()
     start = end - timedelta(days=days)
     return (start.isoformat(), end.isoformat())
 
 def main():
     parser = argparse.ArgumentParser(description="Marketing Analysis Agent (read-only)")
-    parser.add_argument("query", type=str, help="ユーザーからの要望（例：最近の記事の動向は？）")
+    parser.add_argument(
+        "query",
+        nargs="?",
+        default="WordPressの最近の公開・更新状況を教えてください。",
+        type=str,
+        help="ユーザーからの要望（例：最近の記事の動向は？）",
+    )
     parser.add_argument("--ga4-property-id", type=str, default=GA4_PROPERTY_ID)
     parser.add_argument("--gsc-site-url", type=str, default=os.getenv("GSC_SITE_URL", ""))
     parser.add_argument("--days", type=int, default=30)
@@ -260,27 +267,68 @@ def main():
 
     start, end = _date_span(args.days)
 
+    ga4_property_id = (args.ga4_property_id or "").strip()
+    gsc_site_url = (args.gsc_site_url or "").strip()
+
+    enabled_tools: List[Any] = [tool_wp_list_posts]
+    enabled_sources: List[str] = ["WordPress"]
+
+    if ga4_property_id:
+        enabled_tools.append(tool_ga4_report)
+        enabled_sources.append("GA4")
+
+    if gsc_site_url:
+        enabled_tools.append(tool_gsc_query)
+        enabled_sources.append("GSC")
+
+    if SERPAPI_API_KEY:
+        enabled_tools.append(tool_serpapi)
+        enabled_sources.append("SerpAPI")
+
+    if AHREFS_API_KEY:
+        enabled_tools.append(tool_ahrefs_site_overview)
+        enabled_sources.append("Ahrefs MCP")
+
+    if len(enabled_tools) == 1:
+        print(
+            "INFO: Optional connectors (GA4/GSC/SerpAPI/Ahrefs) are not configured. Running with WordPress only.",
+            file=sys.stderr,
+        )
+
+    data_source_summary = ", ".join(enabled_sources)
+
     # 解析前に、最低限の追加文脈を付与
     user_prompt = (
         f"{args.query}\n"
         f"- 解析期間: {start}〜{end}\n"
-        f"- GA4 property: {args.ga4_property_id or '(未設定)'}\n"
-        f"- GSC site: {args.gsc_site_url or '(未設定)'}\n"
+        f"- GA4 property: {ga4_property_id or '(未設定)'}\n"
+        f"- GSC site: {gsc_site_url or '(未設定)'}\n"
         f"- WordPress: {WP_BASE_URL or '(未設定)'}\n"
+        f"- 使用するデータソース: {data_source_summary}\n"
         "必要に応じてツールを呼び出し、記事動向の要点と改善案を提案してください。"
     )
 
-    agent = build_agent()
+    agent = build_agent(enabled_tools)
     # 1ターンで提案（必要に応じてツールを複数回実行）
     result = Runner.run_sync(agent, input=user_prompt, max_turns=10)
 
     # 構造化出力（Pydantic検証済）を取得
     try:
-        plan: ImprovementPlan = result.structured_output  # type: ignore
-        print(json.dumps(plan.model_dump(), ensure_ascii=False, indent=2))
-    except Exception as e:
-        # フォールバック：テキスト出力
-        print(json.dumps({"summary_text": result.final_output, "error": str(e)}, ensure_ascii=False, indent=2))
+        plan = result.final_output_as(ImprovementPlan, raise_if_incorrect_type=True)
+        payload: Dict[str, Any] = plan.model_dump()
+    except TypeError as exc:
+        fallback_output = result.final_output
+        if isinstance(fallback_output, BaseModel):
+            fallback_payload = fallback_output.model_dump()
+        elif isinstance(fallback_output, dict):
+            fallback_payload = fallback_output
+        else:
+            fallback_payload = {"text": str(fallback_output)}
+        payload = {
+            "summary_text": fallback_payload,
+            "error": f"Structured output unavailable: {exc}",
+        }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
     main()
