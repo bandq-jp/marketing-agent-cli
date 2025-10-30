@@ -43,8 +43,8 @@ GSC_TOKEN_JSON = os.getenv("GSC_TOKEN_JSON", "gsc_token.json")
 AHREFS_API_KEY = os.getenv("AHREFS_API_KEY", "")  # MCP用（任意）
 
 # ====== 参考: Google クライアント ======
-from google.analytics.data_v1 import AnalyticsDataClient  # type: ignore
-from google.analytics.data_v1.types import (  # type: ignore
+from google.analytics.data_v1beta import BetaAnalyticsDataClient  # type: ignore
+from google.analytics.data_v1beta.types import (  # type: ignore
     DateRange,
     Dimension,
     Metric,
@@ -112,7 +112,7 @@ def ga4_report_pages(
     """
     if not property_id:
         property_id = GA4_PROPERTY_ID
-    client = AnalyticsDataClient()  # GOOGLE_APPLICATION_CREDENTIALS を前提
+    client = BetaAnalyticsDataClient()  # GOOGLE_APPLICATION_CREDENTIALS を前提
     dims = [Dimension(name="date"), Dimension(name="pagePath"), Dimension(name="sessionDefaultChannelGroup")]
     mets = [Metric(name="screenPageViews"), Metric(name="sessions")]
     req = RunReportRequest(
