@@ -3,13 +3,15 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #   "openai-agents==0.4.2",
+#   "openai-agents-mcp>=0.0.8,<0.1.0",
+#   "mcp-agent>=0.2.4",
 #   "openai==2.6.1",
-#   "httpx>=0.27",
-#   "pydantic>=2.8",
+#   "httpx>=0.28.1",
+#   "pydantic>=2.12.3",
 #   "google-analytics-data==0.19.0",
 #   "google-api-python-client==2.185.0",
-#   "google-auth>=2.35",
-#   "google-auth-oauthlib>=1.2",
+#   "google-auth>=2.42.0",
+#   "google-auth-oauthlib>=1.2.2",
 # ]
 # [tool.uv]
 # exclude-newer = "2025-10-30T00:00:00Z"
@@ -19,20 +21,38 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import importlib
 import json
 import os
+import shlex
 import sys
 import textwrap
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
 import dotenv
 import httpx
 from pydantic import BaseModel, Field
 
-from agents import Agent, AgentOutputSchema, Runner, function_tool
+from agents import AgentOutputSchema, Runner, function_tool
+
+# agents_mcp 0.0.8 expects legacy module paths from older mcp-agent releases.
+def _alias_module(old: str, new: str) -> None:
+    try:  # pragma: no cover - best effort shim
+        importlib.import_module(old)
+    except ModuleNotFoundError:
+        module = importlib.import_module(new)
+        sys.modules[old] = module
+
+
+_alias_module("mcp_agent.mcp_server_registry", "mcp_agent.mcp.mcp_server_registry")
+_alias_module("mcp_agent.context", "mcp_agent.core.context")
+
+from agents_mcp.agent import Agent
 from agents.items import (
     MessageOutputItem,
     ReasoningItem,
@@ -42,12 +62,8 @@ from agents.items import (
 )
 from agents.memory.sqlite_session import SQLiteSession
 from agents.result import RunResultStreaming
-from agents.stream_events import (
-    AgentUpdatedStreamEvent,
-    RawResponsesStreamEvent,
-    RunItemStreamEvent,
-    StreamEvent,
-)
+from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
+from mcp_agent.config import MCPServerSettings, MCPSettings
 
 
 dotenv.load_dotenv()
@@ -56,8 +72,6 @@ dotenv.load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "")
 WP_BASE_URL = os.getenv("WP_BASE_URL", "")
-WP_APP_USER = os.getenv("WP_APP_USER", "")
-WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "")
 GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID", "")
 GSC_OAUTH_CLIENT_JSON = os.getenv("GSC_OAUTH_CLIENT_JSON", "gsc_oauth_client.json")
 GSC_TOKEN_JSON = os.getenv("GSC_TOKEN_JSON", "gsc_token.json")
@@ -100,24 +114,98 @@ class ImprovementPlan(BaseModel):
     sources: List[str] = Field(default_factory=list, description="参照データの出典（URLや説明）")
 
 
-# ====== コネクタ ======
-def wp_list_posts(per_page: int = 20, days: int = 30) -> List[Dict[str, Any]]:
-    if not WP_BASE_URL:
-        return []
-    after = (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
-    url = f"{WP_BASE_URL.rstrip('/')}/wp-json/wp/v2/posts"
-    params = {
-        "per_page": per_page,
-        "orderby": "modified",
-        "order": "desc",
-        "after": after,
-        "_fields": "id,link,date,modified,slug,title",
-    }
-    auth = (WP_APP_USER, WP_APP_PASSWORD) if WP_APP_USER and WP_APP_PASSWORD else None
-    with httpx.Client(timeout=30.0) as client:
-        resp = client.get(url, params=params, auth=auth)
-        resp.raise_for_status()
-        return resp.json()
+# ====== MCP ヘルパ ======
+def _parse_key_value_mapping(raw: str) -> Dict[str, str]:
+    """Parse JSON or comma-separated key=value pairs into a dict."""
+    if not raw:
+        return {}
+    raw = raw.strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = {}
+    else:
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    mapping: Dict[str, str] = {}
+    for chunk in raw.split(","):
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key:
+            mapping[key] = value
+    return mapping
+
+
+def build_wordpress_mcp_settings(
+    *,
+    transport: str,
+    name: str,
+    stdio_command: str,
+    stdio_args: str,
+    stdio_env: str,
+    stdio_cwd: str,
+    http_url: str,
+    http_headers: str,
+    http_username: str,
+    http_password: str,
+    http_bearer: str,
+) -> tuple[MCPSettings, str]:
+    transport_normalized = transport.strip().lower() or "streamable_http"
+    server_name = name.strip() or "wordpress"
+
+    if transport_normalized in {"http", "streamable_http"}:
+        url = http_url.strip()
+        if not url:
+            raise ValueError(
+                "WP MCP HTTP transport requires --wp-mcp-http-url or WP_MCP_HTTP_URL."
+            )
+        headers = _parse_key_value_mapping(http_headers)
+        authorization_present = any(k.lower() == "authorization" for k in headers)
+        bearer = http_bearer.strip()
+        if bearer and not authorization_present:
+            headers["Authorization"] = f"Bearer {bearer}"
+            authorization_present = True
+        username = http_username.strip()
+        password = http_password.strip()
+        if username and password and not authorization_present:
+            token = base64.b64encode(f"{username}:{password}".encode()).decode()
+            headers["Authorization"] = f"Basic {token}"
+            authorization_present = True
+        server_settings = MCPServerSettings(
+            name=server_name,
+            transport="streamable_http",
+            url=url,
+            headers=headers or None,
+        )
+        descriptor = f"{server_name} via streamable_http: {url}"
+    elif transport_normalized == "stdio":
+        executable = stdio_command.strip() or "wp"
+        args_raw = stdio_args.strip()
+        if not args_raw:
+            args_raw = "mcp-adapter serve"
+        args = shlex.split(args_raw)
+        env_overrides = _parse_key_value_mapping(stdio_env)
+        server_settings = MCPServerSettings(
+            name=server_name,
+            transport="stdio",
+            command=executable,
+            args=args,
+            cwd=stdio_cwd.strip() or None,
+            env=env_overrides or None,
+        )
+        descriptor = f"{server_name} via stdio: {executable} {' '.join(args)}".strip()
+    else:
+        raise ValueError(
+            "Unsupported WP MCP transport. Use 'streamable_http' (or 'http') or 'stdio'."
+        )
+
+    settings = MCPSettings(servers={server_name: server_settings})
+    return settings, descriptor
 
 
 def ga4_report_pages(
@@ -212,12 +300,6 @@ def ahrefs_mcp_site_overview(domain: str) -> Dict[str, Any]:
 
 # ====== Agents SDK ツール ======
 @function_tool
-def tool_wp_list_posts(per_page: int = 20, days: int = 30) -> List[Dict[str, Any]]:
-    """WordPress: 最新/更新記事の一覧（読み取り）"""
-    return wp_list_posts(per_page=per_page, days=days)
-
-
-@function_tool
 def tool_ga4_report(property_id: Optional[str], start_date: str, end_date: str) -> Dict[str, Any]:
     """GA4: PV/セッション推移レポート（読み取り）"""
     return ga4_report_pages(property_id or GA4_PROPERTY_ID, start_date, end_date)
@@ -245,7 +327,8 @@ def tool_ahrefs_site_overview(domain: str) -> Dict[str, Any]:
 AGENT_INSTRUCTIONS = """
 あなたは社内マーケ部門のアナリストAIです。次を厳密に守ってください。
 - あなたは「読み取り専用」のツールだけを使います。CMS更新・公開・削除・API書き込み等は一切行いません。
-- WordPress/GA4/GSC/SerpAPI/Ahrefsから得たデータを横断的に解釈し、「改善案（提案）」までを出力してください。
+- WordPress MCPサーバー/GA4/GSC/SerpAPI/Ahrefsから得たデータを横断的に解釈し、「改善案（提案）」までを出力してください。
+- WordPressの情報はMCPアダプターが公開するツールのみを利用し、直接REST APIを呼び出さないでください。
 - 利用可能なツールが制限されている場合は、その範囲で分析し、不足データは「取得できない」旨を明示してください。
 - 出力は指定の構造（JSON）で返します。説明の冗長化は避け、要点と根拠を簡潔に。
 - 推奨KPI例：PV、セッション、CTR、平均掲載順位、流入チャネル別比率。
@@ -253,11 +336,12 @@ AGENT_INSTRUCTIONS = """
 """
 
 
-def build_agent(enabled_tools: List[Any]) -> Agent:
+def build_agent(enabled_tools: List[Any], mcp_server_names: List[str]) -> Agent:
     return Agent(
         name="Marketing Analysis Agent",
         instructions=AGENT_INSTRUCTIONS,
         tools=enabled_tools,
+        mcp_servers=mcp_server_names,
         output_type=AgentOutputSchema(ImprovementPlan, strict_json_schema=True),
     )
 
@@ -356,6 +440,7 @@ def _compose_context_block(
     ga4_property_id: str,
     gsc_site_url: str,
     enabled_sources: Iterable[str],
+    wordpress_mcp_descriptor: str,
 ) -> str:
     lines = [
         query_hint,
@@ -363,6 +448,7 @@ def _compose_context_block(
         f"- GA4 property: {ga4_property_id or '(未設定)'}",
         f"- GSC site: {gsc_site_url or '(未設定)'}",
         f"- WordPress: {WP_BASE_URL or '(未設定)'}",
+        f"- WordPress MCP: {wordpress_mcp_descriptor}",
         f"- 使用するデータソース: {', '.join(enabled_sources)}",
         "必要に応じてツールを呼び出し、記事動向の要点と改善案を提案してください。",
     ]
@@ -479,6 +565,7 @@ async def chat_loop(
     context_block: str,
     initial_query: Optional[str],
     max_turns: int,
+    run_context: Optional[SimpleNamespace],
 ) -> None:
     printer = StreamPrinter()
     pending = initial_query.strip() if initial_query else None
@@ -518,6 +605,7 @@ async def chat_loop(
             result = Runner.run_streamed(
                 agent,
                 input=composed_prompt,
+                context=run_context,
                 session=session,
                 max_turns=max_turns,
             )
@@ -576,6 +664,72 @@ def main() -> None:
         default=10,
         help="1プロンプトあたりの最大ターン数（デフォルト: 10）",
     )
+    parser.add_argument(
+        "--wp-mcp-transport",
+        type=str,
+        default=os.getenv("WP_MCP_TRANSPORT", "streamable_http"),
+        help="WordPress MCPアダプターへの接続方式（streamable_http または stdio）。",
+    )
+    parser.add_argument(
+        "--wp-mcp-stdio-command",
+        type=str,
+        default=os.getenv("WP_MCP_STDIO_COMMAND", "wp"),
+        help="transport=stdio 時に実行するコマンド（既定: wp）。",
+    )
+    parser.add_argument(
+        "--wp-mcp-stdio-args",
+        type=str,
+        default=os.getenv("WP_MCP_STDIO_ARGS", "mcp-adapter serve"),
+        help="transport=stdio 時の引数（space区切り）。既定: 'mcp-adapter serve'。",
+    )
+    parser.add_argument(
+        "--wp-mcp-stdio-env",
+        type=str,
+        default=os.getenv("WP_MCP_STDIO_ENV", ""),
+        help="transport=stdio 時に渡す環境変数。JSON または key=value,key=value 形式。",
+    )
+    parser.add_argument(
+        "--wp-mcp-stdio-cwd",
+        type=str,
+        default=os.getenv("WP_MCP_STDIO_CWD", ""),
+        help="transport=stdio 時のカレントディレクトリ。未設定なら親プロセスと同じ。",
+    )
+    parser.add_argument(
+        "--wp-mcp-http-url",
+        type=str,
+        default=os.getenv("WP_MCP_HTTP_URL", ""),
+        help="transport=streamable_http 時の MCP エンドポイントURL。",
+    )
+    parser.add_argument(
+        "--wp-mcp-http-headers",
+        type=str,
+        default=os.getenv("WP_MCP_HTTP_HEADERS", ""),
+        help="追加HTTPヘッダー。JSON または key=value,key=value 形式。",
+    )
+    parser.add_argument(
+        "--wp-mcp-http-username",
+        type=str,
+        default=os.getenv("WP_MCP_HTTP_USERNAME", ""),
+        help="Basic認証ユーザー名（指定時は Authorization: Basic を自動設定）。",
+    )
+    parser.add_argument(
+        "--wp-mcp-http-password",
+        type=str,
+        default=os.getenv("WP_MCP_HTTP_PASSWORD", ""),
+        help="Basic認証パスワード（指定時は Authorization: Basic を自動設定）。",
+    )
+    parser.add_argument(
+        "--wp-mcp-http-bearer",
+        type=str,
+        default=os.getenv("WP_MCP_HTTP_BEARER", ""),
+        help="Bearer トークン（指定時は Authorization: Bearer を自動設定）。",
+    )
+    parser.add_argument(
+        "--wp-mcp-name",
+        type=str,
+        default=os.getenv("WP_MCP_NAME", "wordpress"),
+        help="WordPress MCP サーバー名（OpenAI Agents SDK 上の識別子）。",
+    )
     args = parser.parse_args()
 
     if not OPENAI_API_KEY:
@@ -583,9 +737,28 @@ def main() -> None:
 
     start, end = _date_span(args.days)
 
+    try:
+        wordpress_mcp_settings, wordpress_descriptor = build_wordpress_mcp_settings(
+            transport=args.wp_mcp_transport,
+            name=args.wp_mcp_name,
+            stdio_command=args.wp_mcp_stdio_command,
+            stdio_args=args.wp_mcp_stdio_args,
+            stdio_env=args.wp_mcp_stdio_env,
+            stdio_cwd=args.wp_mcp_stdio_cwd,
+            http_url=args.wp_mcp_http_url,
+            http_headers=args.wp_mcp_http_headers,
+            http_username=args.wp_mcp_http_username,
+            http_password=args.wp_mcp_http_password,
+            http_bearer=args.wp_mcp_http_bearer,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"WordPress MCP configuration error: {exc}")
+
+    mcp_server_names = [args.wp_mcp_name.strip() or "wordpress"]
+
     # ツール構成
-    enabled_tools: List[Any] = [tool_wp_list_posts]
-    enabled_sources: List[str] = ["WordPress"]
+    enabled_tools: List[Any] = []
+    enabled_sources: List[str] = ["WordPress MCP"]
 
     if args.ga4_property_id:
         enabled_tools.append(tool_ga4_report)
@@ -603,11 +776,12 @@ def main() -> None:
         enabled_tools.append(tool_ahrefs_site_overview)
         enabled_sources.append("Ahrefs MCP")
 
-    if len(enabled_tools) == 1:
-        print("INFO: Optional connectors are not configured. WordPress のみ利用します。", file=sys.stderr)
+    if not enabled_tools:
+        print("INFO: Optional connectors are not configured. WordPress MCP のみ利用します。", file=sys.stderr)
 
-    agent = build_agent(enabled_tools)
+    agent = build_agent(enabled_tools, mcp_server_names)
     session = SQLiteSession(session_id=args.session_id, db_path=args.session_db)
+    run_context = SimpleNamespace(mcp_config=wordpress_mcp_settings)
 
     context_block = _compose_context_block(
         query_hint="以下の要望に応えてください。",
@@ -616,6 +790,7 @@ def main() -> None:
         ga4_property_id=args.ga4_property_id.strip(),
         gsc_site_url=args.gsc_site_url.strip(),
         enabled_sources=enabled_sources,
+        wordpress_mcp_descriptor=wordpress_descriptor,
     )
 
     initial_query = args.query.strip() if args.query else None
@@ -628,6 +803,7 @@ def main() -> None:
                 context_block=context_block,
                 initial_query=initial_query,
                 max_turns=args.max_turns,
+                run_context=run_context,
             )
         )
     except KeyboardInterrupt:
