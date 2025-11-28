@@ -67,9 +67,10 @@ export interface Ability {
      */
     meta?: {
         annotations?: {
-            readonly?: boolean | null;
-            destructive?: boolean | null;
-            idempotent?: boolean | null;
+            instructions?: string;
+            readonly?: boolean;
+            destructive?: boolean;
+            idempotent?: boolean;
         };
         [key: string]: any;
     };

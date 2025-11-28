@@ -18,10 +18,16 @@
 3. **Security‑first** - explicit permissions determine who/what may invoke an ability.
 4. **Gradual adoption** - ships first as a Composer package, migrates smoothly to core.
 
-## Documentation
+## Developer Documentation
 
-- **[Developer docs](docs/README.md)**.
-- **[Contributing Guidelines](CONTRIBUTING.md)**.
+- [Introduction](docs/1.intro.md)
+- [Getting Started](docs/2.getting-started.md)
+- [Registering Abilities](docs/3.registering-abilities.md)
+- [Using Abilities](docs/4.using-abilities.md)
+- [REST API Reference](docs/5.rest-api.md)
+- [Hooks](docs/6.hooks.md)
+- [JavaScript/TypeScript Client](docs/7.javascript-client.md)
+- [Contributing Guidelines](CONTRIBUTING.md)
 
 ## Inspiration
 
