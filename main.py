@@ -40,6 +40,20 @@ from pydantic import BaseModel, Field
 
 from agents import AgentOutputSchema, Runner, function_tool
 
+import dotenv
+dotenv.load_dotenv()
+
+# ====== 環境変数 ======
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "")
+WP_BASE_URL = os.getenv("WP_BASE_URL", "")
+WP_APP_USER = os.getenv("WP_APP_USER", "")
+WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "")
+GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID", "")
+GSC_OAUTH_CLIENT_JSON = os.getenv("GSC_OAUTH_CLIENT_JSON", "gsc_oauth_client.json")
+GSC_TOKEN_JSON = os.getenv("GSC_TOKEN_JSON", "gsc_token.json")
+AHREFS_API_KEY = os.getenv("AHREFS_API_KEY", "")
+
 # agents_mcp 0.0.8 expects legacy module paths from older mcp-agent releases.
 def _alias_module(old: str, new: str) -> None:
     try:  # pragma: no cover - best effort shim
@@ -139,6 +153,19 @@ def _parse_key_value_mapping(raw: str) -> Dict[str, str]:
         if key:
             mapping[key] = value
     return mapping
+
+
+def _default_wp_mcp_http_url(base_url: str) -> str:
+    """Fallback URL for WordPress MCP if only WP_BASE_URL is set.
+
+    Assumes WordPress MCP Adapter is installed and the server ID is
+    "marketing-ro-server" (see my-mcp-abilities/my-mcp-abilities.php).
+    """
+    if not base_url:
+        return ""
+    # Namespace = marketing, route = mcp, server_id = marketing-ro-server
+    # => /wp-json/marketing/mcp/marketing-ro-server
+    return base_url.rstrip("/") + "/wp-json/marketing/mcp/marketing-ro-server"
 
 
 def build_wordpress_mcp_settings(
@@ -736,6 +763,16 @@ def main() -> None:
         raise SystemExit("OPENAI_API_KEY is not set.")
 
     start, end = _date_span(args.days)
+
+    # HTTPモードで URL 未指定の場合、WP_BASE_URL から既定パスを自動補完
+    if args.wp_mcp_transport.lower() in {"http", "streamable_http"} and not args.wp_mcp_http_url:
+        args.wp_mcp_http_url = _default_wp_mcp_http_url(WP_BASE_URL)
+
+    # 認証情報が未指定なら WP_APP_USER / WP_APP_PASSWORD を流用（Application Password想定）
+    if not args.wp_mcp_http_username and WP_APP_USER:
+        args.wp_mcp_http_username = WP_APP_USER
+    if not args.wp_mcp_http_password and WP_APP_PASSWORD:
+        args.wp_mcp_http_password = WP_APP_PASSWORD
 
     try:
         wordpress_mcp_settings, wordpress_descriptor = build_wordpress_mcp_settings(

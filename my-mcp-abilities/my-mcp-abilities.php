@@ -2,7 +2,7 @@
 /**
  * Plugin Name: My MCP Abilities (Packaged)
  * Description: Abilities API + MCP Adapter を同梱した読み取り専用ツール群（パッケージ配布向け）
- * Version: 0.1.0
+ * Version: 0.1.2
  * Requires at least: 6.0
  * Requires PHP: 8.0
  */
@@ -40,10 +40,26 @@ if ( ! function_exists('mma_sanitize_post_array') ) {
 add_action('wp_abilities_api_init', function () {
     if ( ! function_exists('wp_register_ability') ) return;
 
+    // Register ability category first (required by Abilities API).
+    if ( function_exists('wp_register_ability_category') ) {
+        wp_register_ability_category('marketing', [
+            'label'       => 'Marketing',
+            'description' => 'Read-only marketing/content utilities.',
+        ]);
+    }
+
+    // Helper meta shared by read-only abilities so they are exposed via REST.
+    $readonly_meta = [
+        'show_in_rest' => true,
+        'annotations'  => ['readonly' => true],
+    ];
+
     // 1) 投稿一覧（既定は公開のみ）
     wp_register_ability('marketing/get-posts', [
         'label'       => 'Get Recent Posts',
         'description' => 'Retrieve recent posts (read-only; publish by default).',
+        'category'    => 'marketing',
+        'meta'        => $readonly_meta,
         'input_schema' => [
             'type'       => 'object',
             'properties' => [
@@ -83,6 +99,8 @@ add_action('wp_abilities_api_init', function () {
     wp_register_ability('marketing/search-posts', [
         'label'       => 'Search Posts',
         'description' => 'Full-text search for posts by keyword (read-only).',
+        'category'    => 'marketing',
+        'meta'        => $readonly_meta,
         'input_schema' => [
             'type'       => 'object',
             'properties' => [
@@ -122,6 +140,8 @@ add_action('wp_abilities_api_init', function () {
     wp_register_ability('marketing/get-pages', [
         'label'       => 'Get Pages',
         'description' => 'List published pages (read-only).',
+        'category'    => 'marketing',
+        'meta'        => $readonly_meta,
         'input_schema' => [
             'type'=>'object',
             'properties'=>[
@@ -156,6 +176,8 @@ add_action('wp_abilities_api_init', function () {
     wp_register_ability('marketing/get-media', [
         'label'       => 'Get Media',
         'description' => 'List media library items (read-only).',
+        'category'    => 'marketing',
+        'meta'        => $readonly_meta,
         'input_schema' => [
             'type'=>'object',
             'properties'=>[
@@ -199,6 +221,8 @@ add_action('wp_abilities_api_init', function () {
     wp_register_ability('marketing/get-categories', [
         'label'       => 'Get Categories',
         'description' => 'List post categories (read-only).',
+        'category'    => 'marketing',
+        'meta'        => $readonly_meta,
         'input_schema' => [
             'type'=>'object',
             'properties'=>[
@@ -231,6 +255,8 @@ add_action('wp_abilities_api_init', function () {
     wp_register_ability('marketing/get-tags', [
         'label'       => 'Get Tags',
         'description' => 'List post tags (read-only).',
+        'category'    => 'marketing',
+        'meta'        => $readonly_meta,
         'input_schema' => [
             'type'=>'object',
             'properties'=>[
@@ -263,6 +289,8 @@ add_action('wp_abilities_api_init', function () {
     wp_register_ability('marketing/get-comments', [
         'label'       => 'Get Recent Comments',
         'description' => 'List recent approved comments (read-only).',
+        'category'    => 'marketing',
+        'meta'        => $readonly_meta,
         'input_schema' => [
             'type'=>'object',
             'properties'=>[
