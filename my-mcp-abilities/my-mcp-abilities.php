@@ -2,7 +2,7 @@
 /**
  * Plugin Name: My MCP Abilities (Packaged)
  * Description: Abilities API + MCP Adapter を同梱した読み取り専用ツール群（パッケージ配布向け）
- * Version: 0.1.11
+ * Version: 0.1.14
  * Requires at least: 6.0
  * Requires PHP: 8.0
  */
@@ -30,19 +30,14 @@ add_action( 'plugins_loaded', function () {
     }
 });
 
-// ---- 依存パッケージを確実にロード（ホスティング環境でオートローダーが動かない場合の保険）----
-if ( ! function_exists( 'wp_register_ability' ) ) {
-    $abilities_bootstrap = __DIR__ . '/vendor/wordpress/abilities-api/includes/bootstrap.php';
-    if ( file_exists( $abilities_bootstrap ) ) {
-        require_once $abilities_bootstrap;
-    }
+// ---- 依存パッケージを確実にロード（必須）----
+$abilities_bootstrap = __DIR__ . '/vendor/wordpress/abilities-api/includes/bootstrap.php';
+if ( file_exists( $abilities_bootstrap ) ) {
+    require_once $abilities_bootstrap; // defines wp_register_ability, registry, REST routes
 }
-
-if ( ! class_exists( \WP\MCP\Plugin::class ) ) {
-    $mcp_adapter = __DIR__ . '/vendor/wordpress/mcp-adapter/mcp-adapter.php';
-    if ( file_exists( $mcp_adapter ) ) {
-        require_once $mcp_adapter;
-    }
+$mcp_adapter = __DIR__ . '/vendor/wordpress/mcp-adapter/mcp-adapter.php';
+if ( file_exists( $mcp_adapter ) ) {
+    require_once $mcp_adapter; // registers MCP Adapter classes
 }
 // ---- ここまで依存ロード ----
 
@@ -87,11 +82,15 @@ if ( ! function_exists( 'mma_register_marketing_abilities' ) ) {
             ]);
         }
 
-        // Helper meta shared by read-only abilities so they are exposed via REST.
-        $readonly_meta = [
-            'show_in_rest' => true,
-            'annotations'  => ['readonly' => true],
-        ];
+    // Helper meta shared by read-only abilities so they are exposed via REST and MCP default server.
+    $readonly_meta = [
+        'show_in_rest' => true,
+        'annotations'  => ['readonly' => true],
+        'mcp'          => [
+            'public' => true,   // opt-in to default MCP server
+            'type'   => 'tool', // treat as MCP tool
+        ],
+    ];
 
         // 1) 投稿一覧（既定は公開のみ）
         wp_register_ability('marketing/get-posts', [
@@ -375,39 +374,12 @@ add_action( 'abilities_api_init', 'mma_register_marketing_abilities' );
 add_action( 'init', 'mma_register_marketing_abilities', 20 );
 // Extra safety: run on plugins_loaded too.
 add_action( 'plugins_loaded', 'mma_register_marketing_abilities', 12 );
+// Ensure abilities are registered before REST routes serve responses.
+add_action( 'rest_api_init', 'mma_register_marketing_abilities', 9 );
 
 // Final fallback: attempt immediate registration during plugin load if possible.
 if ( function_exists( 'wp_register_ability' ) ) {
     mma_register_marketing_abilities();
 }
 
-/**
- * MCP Adapter サーバ定義（Abilities をこのサーバで公開）
- */
-add_action('mcp_adapter_init', function($adapter){
-    if ( ! is_object($adapter) || ! method_exists($adapter, 'create_server') ) return;
-
-    $adapter->create_server(
-        'marketing-ro-server',            // サーバID（エンドポイント名に使われる）
-        'marketing',                      // ドメイン
-        'mcp',                            // プロトコル
-        'Marketing Readonly MCP Server',  // 表示名
-        'Read-only marketing/content tools', // 説明
-        '0.1.0',                          // バージョン
-        // Prefer HttpTransport (added in mcp-adapter >=0.3). Fallback to RestTransport for older bundles.
-        [ class_exists(\WP\MCP\Transport\HttpTransport::class)
-            ? \WP\MCP\Transport\HttpTransport::class
-            : \WP\MCP\Transport\Http\RestTransport::class ],
-        \WP\MCP\Infrastructure\ErrorHandling\ErrorLogMcpErrorHandler::class,
-        null, // observability handler (null = default)
-        [
-            'marketing/get-posts',
-            'marketing/search-posts',
-            'marketing/get-pages',
-            'marketing/get-media',
-            'marketing/get-categories',
-            'marketing/get-tags',
-            'marketing/get-comments',
-        ]
-    );
-});
+// カスタム MCP サーバーは削除し、デフォルトサーバーに集約。
