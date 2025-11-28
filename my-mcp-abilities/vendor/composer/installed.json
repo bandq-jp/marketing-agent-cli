@@ -154,6 +154,6 @@
             "install-path": "../wordpress/mcp-adapter"
         }
     ],
-    "dev": true,
+    "dev": false,
     "dev-package-names": []
 }

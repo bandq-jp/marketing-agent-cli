@@ -28,13 +28,32 @@ def post(url, json):
 # 1) 認証確認（通ればユーザー情報JSONが返る）
 get(f"{BASE}/wp-json/wp/v2/users/me")
 
-# 2) Abilities ルート確認
-get(f"{BASE}/wp-json/wp-abilities/v1")
-get(f"{BASE}/wp-json/wp-abilities/v1/abilities")
+# 2) Abilities ルート確認（Abilities API は wp/v2 配下）
+get(f"{BASE}/wp-json/wp/v2/abilities")
+get(f"{BASE}/wp-json/wp/v2/abilities/marketing/get-posts")
 
-# 3) 実行（Abilities API の正式ルート: /abilities/{name}/run）
-# GET の場合、input はクエリで object 形式にする必要がある（例: input[number]=5）
+# 3) abilities 実行 (GET; input はクエリで object 形式)
 get(
-    f"{BASE}/wp-json/wp-abilities/v1/abilities/marketing/get-posts/run",
+    f"{BASE}/wp-json/wp/v2/abilities/marketing/get-posts/run",
     params={"input[number]": 5, "input[status]": "publish"},
+)
+
+# 4) MCP HttpTransport ハンドシェイク → tools/list
+def jsonrpc(url, payload, session_id=None):
+    headers = {"Content-Type": "application/json"}
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+    r = requests.post(url, json=payload, auth=auth, timeout=20, headers=headers)
+    print("POST", url, r.status_code, "sid", session_id); print(r.text[:2000]); return r
+
+mcp_url = f"{BASE}/wp-json/mcp/mcp-adapter-default-server"
+init = jsonrpc(mcp_url, {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+sid = init.headers.get("Mcp-Session-Id")
+if not sid:
+    print("initialize で Session ID が取得できませんでした"); sys.exit(1)
+
+jsonrpc(
+    mcp_url,
+    {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}},
+    session_id=sid,
 )

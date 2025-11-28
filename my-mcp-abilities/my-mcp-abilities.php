@@ -2,7 +2,7 @@
 /**
  * Plugin Name: My MCP Abilities (Packaged)
  * Description: Abilities API + MCP Adapter を同梱した読み取り専用ツール群（パッケージ配布向け）
- * Version: 0.1.4
+ * Version: 0.1.9
  * Requires at least: 6.0
  * Requires PHP: 8.0
  */
@@ -16,6 +16,19 @@ if ( file_exists($base . 'autoload_packages.php') ) {
 } elseif ( file_exists($base . 'autoload.php') ) {
     require_once $base . 'autoload.php';
 }
+
+// Initialize the MCP Adapter so its REST routes (and default server) are registered.
+add_action( 'plugins_loaded', function () {
+    $class = '\\WP\\MCP\\Core\\McpAdapter';
+    if ( class_exists( $class ) ) {
+        $class::instance();
+    }
+
+    // Force Abilities registry bootstrap so abilities_api_init definitely fires.
+    if ( class_exists( 'WP_Abilities_Registry' ) ) {
+        WP_Abilities_Registry::get_instance();
+    }
+});
 
 // ---- 依存パッケージを確実にロード（ホスティング環境でオートローダーが動かない場合の保険）----
 if ( ! function_exists( 'wp_register_ability' ) ) {
@@ -52,67 +65,77 @@ if ( ! function_exists('mma_sanitize_post_array') ) {
 
 /**
  * Abilities 登録（読み取り専用ツール群）
+ * - abilities_api_init が本来のフック
+ * - 念のため init からも呼び出し、二重登録は静的フラグで防ぐ
  */
-add_action('wp_abilities_api_init', function () {
-    if ( ! function_exists('wp_register_ability') ) return;
+if ( ! function_exists( 'mma_register_marketing_abilities' ) ) {
+    function mma_register_marketing_abilities() {
+        static $registered = false;
+        if ( $registered ) return;
+        if ( ! function_exists( 'wp_register_ability' ) ) return;
 
-    // Register ability category first (required by Abilities API).
-    if ( function_exists('wp_register_ability_category') ) {
-        wp_register_ability_category('marketing', [
-            'label'       => 'Marketing',
-            'description' => 'Read-only marketing/content utilities.',
-        ]);
-    }
+        // Ensure registry exists (should already be bootstrapped).
+        if ( class_exists( 'WP_Abilities_Registry' ) ) {
+            WP_Abilities_Registry::get_instance();
+        }
 
-    // Helper meta shared by read-only abilities so they are exposed via REST.
-    $readonly_meta = [
-        'show_in_rest' => true,
-        'annotations'  => ['readonly' => true],
-    ];
+        // Register ability category first (required by Abilities API).
+        if ( function_exists('wp_register_ability_category') ) {
+            wp_register_ability_category('marketing', [
+                'label'       => 'Marketing',
+                'description' => 'Read-only marketing/content utilities.',
+            ]);
+        }
 
-    // 1) 投稿一覧（既定は公開のみ）
-    wp_register_ability('marketing/get-posts', [
-        'label'       => 'Get Recent Posts',
-        'description' => 'Retrieve recent posts (read-only; publish by default).',
-        'category'    => 'marketing',
-        'meta'        => $readonly_meta,
-        'input_schema' => [
-            'type'       => 'object',
-            'properties' => [
-                'number' => ['type'=>'integer','minimum'=>1,'maximum'=>50,'default'=>5],
-                'status' => ['type'=>'string','enum'=>['publish','private'],'default'=>'publish'],
-            ],
-        ],
-        'output_schema' => [
-            'type'  => 'array',
-            'items' => [
+        // Helper meta shared by read-only abilities so they are exposed via REST.
+        $readonly_meta = [
+            'show_in_rest' => true,
+            'annotations'  => ['readonly' => true],
+        ];
+
+        // 1) 投稿一覧（既定は公開のみ）
+        wp_register_ability('marketing/get-posts', [
+            'label'       => 'Get Recent Posts',
+            'description' => 'Retrieve recent posts (read-only; publish by default).',
+            'category'    => 'marketing',
+            'meta'        => $readonly_meta,
+            'input_schema' => [
                 'type'       => 'object',
                 'properties' => [
-                    'ID'=>['type'=>'integer'],
-                    'title'=>['type'=>'string'],
-                    'modified'=>['type'=>'string'],
-                    'link'=>['type'=>'string'],
-                    'type'=>['type'=>'string'],
-                    'status'=>['type'=>'string'],
+                    'number' => ['type'=>'integer','minimum'=>1,'maximum'=>50,'default'=>5],
+                    'status' => ['type'=>'string','enum'=>['publish','private'],'default'=>'publish'],
                 ],
-                'required' => ['ID','title','modified','link'],
             ],
-        ],
-        'execute_callback' => function ($in) {
-            $posts = get_posts([
-                'numberposts' => $in['number'] ?? 5,
-                'post_status' => $in['status'] ?? 'publish',
-            ]);
-            return array_map('mma_sanitize_post_array', $posts);
-        },
-        'permission_callback' => function ($in) {
-            $status = $in['status'] ?? 'publish';
-            return ($status === 'publish') ? true : current_user_can('read_private_posts');
-        },
-    ]);
+            'output_schema' => [
+                'type'  => 'array',
+                'items' => [
+                    'type'       => 'object',
+                    'properties' => [
+                        'ID'=>['type'=>'integer'],
+                        'title'=>['type'=>'string'],
+                        'modified'=>['type'=>'string'],
+                        'link'=>['type'=>'string'],
+                        'type'=>['type'=>'string'],
+                        'status'=>['type'=>'string'],
+                    ],
+                    'required' => ['ID','title','modified','link'],
+                ],
+            ],
+            'execute_callback' => function ($in) {
+                $posts = get_posts([
+                    'numberposts' => $in['number'] ?? 5,
+                    'post_status' => $in['status'] ?? 'publish',
+                ]);
+                return array_map('mma_sanitize_post_array', $posts);
+            },
+            'permission_callback' => function ($in) {
+                $status = $in['status'] ?? 'publish';
+                return ($status === 'publish') ? true : current_user_can('read_private_posts');
+            },
+        ]);
 
     // 2) 投稿検索（全文検索）
-    wp_register_ability('marketing/search-posts', [
+        wp_register_ability('marketing/search-posts', [
         'label'       => 'Search Posts',
         'description' => 'Full-text search for posts by keyword (read-only).',
         'category'    => 'marketing',
@@ -153,7 +176,7 @@ add_action('wp_abilities_api_init', function () {
     ]);
 
     // 3) 固定ページ
-    wp_register_ability('marketing/get-pages', [
+        wp_register_ability('marketing/get-pages', [
         'label'       => 'Get Pages',
         'description' => 'List published pages (read-only).',
         'category'    => 'marketing',
@@ -189,7 +212,7 @@ add_action('wp_abilities_api_init', function () {
     ]);
 
     // 4) メディア
-    wp_register_ability('marketing/get-media', [
+        wp_register_ability('marketing/get-media', [
         'label'       => 'Get Media',
         'description' => 'List media library items (read-only).',
         'category'    => 'marketing',
@@ -234,7 +257,7 @@ add_action('wp_abilities_api_init', function () {
     ]);
 
     // 5) カテゴリ
-    wp_register_ability('marketing/get-categories', [
+        wp_register_ability('marketing/get-categories', [
         'label'       => 'Get Categories',
         'description' => 'List post categories (read-only).',
         'category'    => 'marketing',
@@ -268,7 +291,7 @@ add_action('wp_abilities_api_init', function () {
     ]);
 
     // 6) タグ
-    wp_register_ability('marketing/get-tags', [
+        wp_register_ability('marketing/get-tags', [
         'label'       => 'Get Tags',
         'description' => 'List post tags (read-only).',
         'category'    => 'marketing',
@@ -302,7 +325,7 @@ add_action('wp_abilities_api_init', function () {
     ]);
 
     // 7) コメント
-    wp_register_ability('marketing/get-comments', [
+        wp_register_ability('marketing/get-comments', [
         'label'       => 'Get Recent Comments',
         'description' => 'List recent approved comments (read-only).',
         'category'    => 'marketing',
@@ -341,8 +364,15 @@ add_action('wp_abilities_api_init', function () {
             ], $comments);
         },
         'permission_callback' => fn()=>true,
-    ]);
-});
+        ]);
+
+        $registered = true;
+    }
+}
+
+add_action( 'abilities_api_init', 'mma_register_marketing_abilities' );
+// Fallback: if abilities_api_init didn’t fire for some reason, try after core init.
+add_action( 'init', 'mma_register_marketing_abilities', 20 );
 
 /**
  * MCP Adapter サーバ定義（Abilities をこのサーバで公開）
@@ -362,6 +392,7 @@ add_action('mcp_adapter_init', function($adapter){
             ? \WP\MCP\Transport\HttpTransport::class
             : \WP\MCP\Transport\Http\RestTransport::class ],
         \WP\MCP\Infrastructure\ErrorHandling\ErrorLogMcpErrorHandler::class,
+        null, // observability handler (null = default)
         [
             'marketing/get-posts',
             'marketing/search-posts',
