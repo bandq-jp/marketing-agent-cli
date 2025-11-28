@@ -5,7 +5,7 @@
         'type' => 'library',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
-        'reference' => '5ebdd871404c2651a10ccf1147579d81ed09ebc7',
+        'reference' => '6d33355ae7927c82e5d9ebf86dbc1cf1f8e246ed',
         'name' => '__root__',
         'dev' => false,
     ),
@@ -16,7 +16,7 @@
             'type' => 'library',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),
-            'reference' => '5ebdd871404c2651a10ccf1147579d81ed09ebc7',
+            'reference' => '6d33355ae7927c82e5d9ebf86dbc1cf1f8e246ed',
             'dev_requirement' => false,
         ),
         'wordpress/abilities-api' => array(
