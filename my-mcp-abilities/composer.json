@@ -1,7 +1,7 @@
 {
     "require": {
-        "wordpress/abilities-api": "^0.4.0",
-        "wordpress/mcp-adapter": "^0.1.0"
+        "wordpress/abilities-api": "^0.3.0",
+        "wordpress/mcp-adapter": "^0.3.0"
     },
     "config": {
         "allow-plugins": {

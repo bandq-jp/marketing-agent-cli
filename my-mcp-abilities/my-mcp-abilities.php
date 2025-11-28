@@ -2,7 +2,7 @@
 /**
  * Plugin Name: My MCP Abilities (Packaged)
  * Description: Abilities API + MCP Adapter を同梱した読み取り専用ツール群（パッケージ配布向け）
- * Version: 0.1.2
+ * Version: 0.1.3
  * Requires at least: 6.0
  * Requires PHP: 8.0
  */
@@ -341,7 +341,10 @@ add_action('mcp_adapter_init', function($adapter){
         'Marketing Readonly MCP Server',  // 表示名
         'Read-only marketing/content tools', // 説明
         '0.1.0',                          // バージョン
-        [ \WP\MCP\Transport\HttpTransport::class ],
+        // Prefer HttpTransport (added in mcp-adapter >=0.3). Fallback to RestTransport for older bundles.
+        [ class_exists(\WP\MCP\Transport\HttpTransport::class)
+            ? \WP\MCP\Transport\HttpTransport::class
+            : \WP\MCP\Transport\Http\RestTransport::class ],
         \WP\MCP\Infrastructure\ErrorHandling\ErrorLogMcpErrorHandler::class,
         [
             'marketing/get-posts',

@@ -14,9 +14,10 @@ if not USER or not PWD:
 
 auth = HTTPBasicAuth(USER, PWD)
 
-def get(url):
-    r = requests.get(url, auth=auth, timeout=20)
-    print("GET", url, r.status_code); print(r.text[:2000])
+def get(url, params=None):
+    r = requests.get(url, params=params, auth=auth, timeout=20)
+    full_url = r.url  # resolved URL with query for logging
+    print("GET", full_url, r.status_code); print(r.text[:2000])
     return r
 
 def post(url, json):
@@ -32,5 +33,8 @@ get(f"{BASE}/wp-json/wp-abilities/v1")
 get(f"{BASE}/wp-json/wp-abilities/v1/abilities")
 
 # 3) 実行（Abilities API の正式ルート: /abilities/{name}/run）
-# 読み取り専用なので GET で十分（input を省略するとデフォルト=最新公開5件）
-get(f"{BASE}/wp-json/wp-abilities/v1/abilities/marketing/get-posts/run")
+# GET の場合、input はクエリで object 形式にする必要がある（例: input[number]=5）
+get(
+    f"{BASE}/wp-json/wp-abilities/v1/abilities/marketing/get-posts/run",
+    params={"input[number]": 5, "input[status]": "publish"},
+)
