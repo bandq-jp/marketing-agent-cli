@@ -2,7 +2,7 @@
 /**
  * Plugin Name: My MCP Abilities (Packaged)
  * Description: Abilities API + MCP Adapter を同梱した読み取り専用ツール群（パッケージ配布向け）
- * Version: 0.1.9
+ * Version: 0.1.11
  * Requires at least: 6.0
  * Requires PHP: 8.0
  */
@@ -373,6 +373,13 @@ if ( ! function_exists( 'mma_register_marketing_abilities' ) ) {
 add_action( 'abilities_api_init', 'mma_register_marketing_abilities' );
 // Fallback: if abilities_api_init didn’t fire for some reason, try after core init.
 add_action( 'init', 'mma_register_marketing_abilities', 20 );
+// Extra safety: run on plugins_loaded too.
+add_action( 'plugins_loaded', 'mma_register_marketing_abilities', 12 );
+
+// Final fallback: attempt immediate registration during plugin load if possible.
+if ( function_exists( 'wp_register_ability' ) ) {
+    mma_register_marketing_abilities();
+}
 
 /**
  * MCP Adapter サーバ定義（Abilities をこのサーバで公開）
