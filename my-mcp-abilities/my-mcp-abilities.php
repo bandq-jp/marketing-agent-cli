@@ -2,7 +2,7 @@
 /**
  * Plugin Name: My MCP Abilities (Packaged)
  * Description: Abilities API + MCP Adapter を同梱した読み取り専用ツール群（パッケージ配布向け）
- * Version: 0.1.3
+ * Version: 0.1.4
  * Requires at least: 6.0
  * Requires PHP: 8.0
  */
@@ -16,6 +16,22 @@ if ( file_exists($base . 'autoload_packages.php') ) {
 } elseif ( file_exists($base . 'autoload.php') ) {
     require_once $base . 'autoload.php';
 }
+
+// ---- 依存パッケージを確実にロード（ホスティング環境でオートローダーが動かない場合の保険）----
+if ( ! function_exists( 'wp_register_ability' ) ) {
+    $abilities_bootstrap = __DIR__ . '/vendor/wordpress/abilities-api/includes/bootstrap.php';
+    if ( file_exists( $abilities_bootstrap ) ) {
+        require_once $abilities_bootstrap;
+    }
+}
+
+if ( ! class_exists( \WP\MCP\Plugin::class ) ) {
+    $mcp_adapter = __DIR__ . '/vendor/wordpress/mcp-adapter/mcp-adapter.php';
+    if ( file_exists( $mcp_adapter ) ) {
+        require_once $mcp_adapter;
+    }
+}
+// ---- ここまで依存ロード ----
 
 /**
  * 出力整形（投稿/固定ページ/添付 兼用）
